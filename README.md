@@ -6,6 +6,7 @@ dão a mesma saída do código original (conferido com `scripts/validar.sh`).
 | Versão | Issue | Tag | Treino (s) |
 |---|---|---|---:|
 | Legado com -O3 | [#1](../../issues/1) | [v0.1-baseline](../../tree/v0.1-baseline) | 0,362 |
+| CPU com pesos contíguos | [#3](../../issues/3) | [v0.2-cpu-memoria](../../tree/v0.2-cpu-memoria) | 0,162 |
 
 ---
 
