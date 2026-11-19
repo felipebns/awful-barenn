@@ -10,6 +10,7 @@ dão a mesma saída do código original (conferido com `scripts/validar.sh`).
 | CPU + MPI (4 processos) | [#5](../../issues/5) | [v0.3-cpu-mpi](../../tree/v0.3-cpu-mpi) | 0,162 | 9,2 (31,2 com 1 processo) |
 | CUDA, porte direto | [#7](../../issues/7) | [v1.0-cuda-ingenuo](../../tree/v1.0-cuda-ingenuo) | 124,9 | 26.087 |
 | CUDA, dados na GPU | [#9](../../issues/9) | [v1.1-cuda-residente](../../tree/v1.1-cuda-residente) | 5,40 | 1.292 |
+| CUDA, kernel único com memória compartilhada | [#11](../../issues/11) | [v1.2-cuda-shared](../../tree/v1.2-cuda-shared) | 0,396 | 1.384 |
 
 ---
 
