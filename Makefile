@@ -1,5 +1,5 @@
 # -ffp-contract=off: sem FMA, para a saída bater bit a bit com a do legado
-CXX      = g++
+CXX      = mpic++
 OPT      ?= -O3
 CXXFLAGS  = -std=c++17 $(OPT) -ffp-contract=off -Wall -Wextra
 

@@ -1,3 +1,5 @@
+#include <mpi.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -110,6 +112,12 @@ public:
         }
         return propagate ? grad_in.data() : nullptr;
     }
+
+    void compartilhar_parametros() {
+        MPI_Bcast(weights.data(), static_cast<int>(weights.size()), MPI_FLOAT,
+                  0, MPI_COMM_WORLD);
+        MPI_Bcast(bias.data(), out_features, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    }
 };
 
 // imagens em um vetor só: a imagem i começa em i * entradas
@@ -178,56 +186,124 @@ float perda(const float* escores, int rotulo, float* gradiente = nullptr) {
     return total;
 }
 
-void avaliar(DenseLayer& l1, DenseLayer& l2, DenseLayer& l3,
-             const Dados& teste) {
-    struct Exemplo {
-        size_t linha;
-        int real;
-        int previsto;
-        int segundo;
-        float maior_escore;
-        float segundo_escore;
-    };
+// até 3 acertos e 3 erros por processo, cada um {linha, real, previsto}
+constexpr int max_exemplos = 6;
+constexpr int campos_exemplo = 3;
 
-    // Linhas representam a classe esperada e colunas, a classe prevista.
-    array<array<size_t, classes>, classes> confusoes{};
-    vector<Exemplo> exemplos;
-    size_t acertos = 0;
-    size_t exemplos_acerto = 0;
-    size_t exemplos_erro = 0;
+struct Parcial {
+    int acertos = 0;
     double perda_total = 0;
+    array<int, classes * classes> confusoes{};
+    array<int, max_exemplos * campos_exemplo> exemplos{};
+    int exemplos_acerto = 0;
+    int exemplos_erro = 0;
 
-    // Só fazemos forward aqui. Os pesos ficam fixos.
-    for (size_t i = 0; i < teste.size(); ++i) {
-        const int rotulo = teste.rotulos[i];
-        const float* escores = l3.Forward(l2.Forward(l1.Forward(teste.imagem(i))));
+    void processar(const float* escores, int rotulo, int indice_global) {
         // O índice do maior escore indica a classe prevista.
-        int previsto = static_cast<int>(max_element(escores, escores + classes) - escores);
-        bool acertou = previsto == rotulo;
+        const int previsto =
+            static_cast<int>(max_element(escores, escores + classes) - escores);
+        const bool acertou = previsto == rotulo;
         acertos += acertou;
-        ++confusoes[rotulo][previsto];
+        ++confusoes[rotulo * classes + previsto];
         perda_total += perda(escores, rotulo);
 
-        // Guarda até três acertos e três erros para ilustrar a saída.
-        // A acurácia usa todas as imagens, inclusive as não exibidas.
-        size_t& exemplos_tipo = acertou ? exemplos_acerto : exemplos_erro;
+        int& exemplos_tipo = acertou ? exemplos_acerto : exemplos_erro;
         if (exemplos_tipo < 3) {
-            int segundo = previsto == 0 ? 1 : 0;
-            for (int classe = 0; classe < classes; ++classe) {
-                if (classe != previsto && escores[classe] > escores[segundo]) {
-                    segundo = classe;
-                }
-            }
-            exemplos.push_back({i + 1, rotulo, previsto, segundo,
-                                escores[previsto], escores[segundo]});
+            int* e = &exemplos[(exemplos_acerto + exemplos_erro) * campos_exemplo];
+            e[0] = indice_global + 1;
+            e[1] = rotulo;
+            e[2] = previsto;
+            ++exemplos_tipo;
+        }
+    }
+};
+
+// cada processo avalia uma fatia do teste
+void avaliar(DenseLayer& l1, DenseLayer& l2, DenseLayer& l3,
+             const Dados& teste, int rank, int total) {
+    const auto inicio = chrono::steady_clock::now();
+
+    // pesos do rank 0 para todos
+    l1.compartilhar_parametros();
+    l2.compartilhar_parametros();
+    l3.compartilhar_parametros();
+
+    int n = rank == 0 ? static_cast<int>(teste.size()) : 0;
+    MPI_Bcast(&n, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    // fatias iguais; o que sobra fica com o rank 0
+    const int bloco = n / total;
+    const int distribuidos = bloco * total;
+    Dados local;
+    local.imagens.resize(static_cast<size_t>(bloco) * entradas);
+    local.rotulos.resize(bloco);
+    MPI_Scatter(teste.imagens.data(), bloco * entradas, MPI_FLOAT,
+                local.imagens.data(), bloco * entradas, MPI_FLOAT,
+                0, MPI_COMM_WORLD);
+    MPI_Scatter(teste.rotulos.data(), bloco, MPI_INT,
+                local.rotulos.data(), bloco, MPI_INT,
+                0, MPI_COMM_WORLD);
+
+    Parcial parcial;
+    for (int i = 0; i < bloco; ++i) {
+        const float* escores = l3.Forward(l2.Forward(l1.Forward(local.imagem(i))));
+        parcial.processar(escores, local.rotulos[i], rank * bloco + i);
+    }
+    if (rank == 0) {
+        for (int i = distribuidos; i < n; ++i) {
+            const float* escores = l3.Forward(l2.Forward(l1.Forward(teste.imagem(i))));
+            parcial.processar(escores, teste.rotulos[i], i);
+        }
+    }
+
+    int acertos = 0;
+    double perda_total = 0;
+    array<int, classes * classes> confusoes{};
+    vector<int> todos_exemplos(rank == 0 ? total * max_exemplos * campos_exemplo : 0);
+    MPI_Reduce(&parcial.acertos, &acertos, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&parcial.perda_total, &perda_total, 1, MPI_DOUBLE, MPI_SUM,
+               0, MPI_COMM_WORLD);
+    MPI_Reduce(parcial.confusoes.data(), confusoes.data(), classes * classes,
+               MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Gather(parcial.exemplos.data(), max_exemplos * campos_exemplo, MPI_INT,
+               todos_exemplos.data(), max_exemplos * campos_exemplo, MPI_INT,
+               0, MPI_COMM_WORLD);
+    const chrono::duration<double> tempo = chrono::steady_clock::now() - inicio;
+
+    if (rank != 0) {
+        return;
+    }
+
+    // os 3 primeiros acertos e erros, na ordem das linhas
+    struct Exemplo {
+        int linha;
+        int real;
+        int previsto;
+    };
+    vector<Exemplo> candidatos;
+    for (int k = 0; k < total * max_exemplos; ++k) {
+        const int* e = &todos_exemplos[k * campos_exemplo];
+        if (e[0] > 0) {
+            candidatos.push_back({e[0], e[1], e[2]});
+        }
+    }
+    sort(candidatos.begin(), candidatos.end(),
+         [](const Exemplo& a, const Exemplo& b) { return a.linha < b.linha; });
+    vector<Exemplo> exemplos;
+    int exemplos_acerto = 0;
+    int exemplos_erro = 0;
+    for (const auto& c : candidatos) {
+        int& exemplos_tipo = c.real == c.previsto ? exemplos_acerto : exemplos_erro;
+        if (exemplos_tipo < 3) {
+            exemplos.push_back(c);
             ++exemplos_tipo;
         }
     }
 
     cout << "\nAVALIACAO FINAL\n"
-         << "Acuracia " << setprecision(1) << 100.0 * acertos / teste.size()
-         << "% | " << acertos << " acertos em " << teste.size() << " imagens\n"
-         << "Perda media " << setprecision(4) << perda_total / teste.size() << "\n";
+         << "Acuracia " << setprecision(1) << 100.0 * acertos / n
+         << "% | " << acertos << " acertos em " << n << " imagens\n"
+         << "Perda media " << setprecision(4) << perda_total / n << "\n";
 
     cout << "\nALGUMAS INFERENCIAS\n";
     cout << "Esperado  Previsto\n";
@@ -240,13 +316,14 @@ void avaliar(DenseLayer& l1, DenseLayer& l2, DenseLayer& l3,
     struct Confusao {
         int real;
         int previsto;
-        size_t ocorrencias;
+        int ocorrencias;
     };
     vector<Confusao> erros;
     for (int real = 0; real < classes; ++real) {
         for (int previsto = 0; previsto < classes; ++previsto) {
-            if (real != previsto && confusoes[real][previsto] > 0) {
-                erros.push_back({real, previsto, confusoes[real][previsto]});
+            const int ocorrencias = confusoes[real * classes + previsto];
+            if (real != previsto && ocorrencias > 0) {
+                erros.push_back({real, previsto, ocorrencias});
             }
         }
     }
@@ -268,31 +345,58 @@ void avaliar(DenseLayer& l1, DenseLayer& l2, DenseLayer& l3,
                 << "  " << setw(11) << erro.ocorrencias << '\n';
         }
     }
+    cout << "Tempo de avaliacao " << setprecision(6) << tempo.count()
+         << " s | " << total << " processo(s) MPI\n";
 }
 
 } // namespace Barenn
 
 int main(int argc, char** argv) {
+    MPI_Init(&argc, &argv);
+    int rank, total;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &total);
+
     if (argc != 1 && argc != 3) {
-        cerr << "Uso: " << argv[0] << " [arquivo_treino arquivo_teste]\n";
+        if (rank == 0) {
+            cerr << "Uso: " << argv[0] << " [arquivo_treino arquivo_teste]\n";
+        }
+        MPI_Finalize();
         return 1;
     }
     const string arquivo_treino = argc == 3 ? argv[1] : "optdigits.tra";
     const string arquivo_teste = argc == 3 ? argv[2] : "optdigits.tes";
 
-    try {
-        const auto treino = Barenn::ler_dados(arquivo_treino);
-        const auto teste = Barenn::ler_dados(arquivo_teste);
-        if (filesystem::equivalent(arquivo_treino, arquivo_teste)) {
-            throw runtime_error("Use arquivos distintos para treino e teste.");
+    // só o rank 0 lê os arquivos; se falhar, todos encerram
+    Barenn::Dados treino, teste;
+    int falhou = 0;
+    if (rank == 0) {
+        try {
+            treino = Barenn::ler_dados(arquivo_treino);
+            teste = Barenn::ler_dados(arquivo_teste);
+            if (filesystem::equivalent(arquivo_treino, arquivo_teste)) {
+                throw runtime_error("Use arquivos distintos para treino e teste.");
+            }
+        } catch (const exception& erro) {
+            cerr << "Erro: " << erro.what() << "\n";
+            falhou = 1;
         }
+    }
+    MPI_Bcast(&falhou, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    if (falhou) {
+        MPI_Finalize();
+        return 1;
+    }
 
-        constexpr int epocas = 51;
-        constexpr float taxa = 0.02f;
-        // Rede densa com dimensões 64 -> 32 -> 16 -> 10.
-        Barenn::DenseLayer l1(Barenn::entradas, 32);
-        Barenn::DenseLayer l2(32, 16);
-        Barenn::DenseLayer l3(16, Barenn::classes, true);
+    constexpr int epocas = 51;
+    constexpr float taxa = 0.02f;
+    // Rede densa com dimensões 64 -> 32 -> 16 -> 10.
+    Barenn::DenseLayer l1(Barenn::entradas, 32);
+    Barenn::DenseLayer l2(32, 16);
+    Barenn::DenseLayer l3(16, Barenn::classes, true);
+
+    // o SGD é sequencial, então o treino fica só no rank 0
+    if (rank == 0) {
         array<float, Barenn::classes> gradiente{};
         array<double, epocas> perdas{};
 
@@ -323,9 +427,10 @@ int main(int argc, char** argv) {
                  << " | perda media " << perdas[epoca] << "\n";
         }
         cout << "Tempo de treino " << tempo.count() << " s\n";
-        Barenn::avaliar(l1, l2, l3, teste);
-    } catch (const exception& erro) {
-        cerr << "Erro: " << erro.what() << "\n";
-        return 1;
     }
+
+    Barenn::avaliar(l1, l2, l3, teste, rank, total);
+
+    MPI_Finalize();
+    return 0;
 }
