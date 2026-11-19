@@ -1,6 +1,6 @@
 # Resultados
 
-Tempos de treino no cluster Franky (i7-13700T), média de 5 execuções. Todas as versões
+Tempos no cluster Franky: CPU i7-13700T e GPU RTX A1000, média de 5 execuções (3 na v1.0). Todas as versões
 dão a mesma saída do código original (conferido com `scripts/validar.sh`).
 
 | Versão | Issue | Tag | Treino (s) | Avaliação, teste ×50 (ms) |
@@ -8,6 +8,7 @@ dão a mesma saída do código original (conferido com `scripts/validar.sh`).
 | Legado com -O3 | [#1](../../issues/1) | [v0.1-baseline](../../tree/v0.1-baseline) | 0,362 | — |
 | CPU com pesos contíguos | [#3](../../issues/3) | [v0.2-cpu-memoria](../../tree/v0.2-cpu-memoria) | 0,162 | — |
 | CPU + MPI (4 processos) | [#5](../../issues/5) | [v0.3-cpu-mpi](../../tree/v0.3-cpu-mpi) | 0,162 | 9,2 (31,2 com 1 processo) |
+| CUDA, porte direto | [#7](../../issues/7) | [v1.0-cuda-ingenuo](../../tree/v1.0-cuda-ingenuo) | 124,9 | 26.087 |
 
 ---
 
